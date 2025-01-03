@@ -10,10 +10,12 @@
 // adapted from https://stackoverflow.com/questions/70802306/convert-a-12-bit-signed-number-in-c
 #define TOINT16(val, bits) (((struct { int16_t value : bits; }){val}).value)
 
+#include <drivers/behavior.h>
 #include <zephyr/kernel.h>
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/input/input.h>
 #include <zmk/keymap.h>
+#include <zmk/behavior_queue.h>
 #include "pmw3610.h"
 
 #include <zephyr/logging/log.h>
@@ -60,15 +62,24 @@ static int (*const async_init_fn[ASYNC_INIT_STEP_COUNT])(const struct device *de
 };
 
 struct move_precision_leftover {
-	uint16_t x;
-	uint16_t y;
+    uint16_t x;
+    uint16_t y;
 };
 static struct move_precision_leftover leftover = {
-	.x = 0,
-	.y = 0
+    .x = 0,
+    .y = 0
 };
 
 //////// Function definitions //////////
+
+static inline void tap_key(uint32_t param1) {
+    struct zmk_behavior_binding behavior = {
+    	.behavior_dev = "key_press",
+    	.param1 = param1,
+    };
+    zmk_behavior_queue_add(0, behavior, true, 10);
+    zmk_behavior_queue_add(0, behavior, false, 10);
+}
 
 // checked and keep
 static int spi_cs_ctrl(const struct device *dev, bool enable) {
@@ -583,6 +594,11 @@ static enum pixart_input_mode get_input_mode_for_current_layer(const struct devi
             return SNIPE;
         }
     }
+    for (size_t i = 0; i < config->text_layers_len; i++) {
+        if (curr_layer == config->text_layers[i]) {
+            return TEXT;
+        }
+    }
     return MOVE;
 }
 
@@ -614,6 +630,14 @@ static int pmw3610_report_data(const struct device *dev) {
     case SNIPE:
         set_cpi_if_needed(dev, CONFIG_PMW3610_SNIPE_CPI);
         dividor = CONFIG_PMW3610_SNIPE_CPI_DIVIDOR;
+        break;
+    case TEXT:
+        set_cpi_if_needed(dev, CONFIG_PMW3610_CPI);
+        if (input_mode_changed) {
+            data->scroll_delta_x = 0;
+            data->scroll_delta_y = 0;
+        }
+        dividor = 1; // this should be handled with the ticks rather than dividors
         break;
     default:
         return -ENOTSUP;
@@ -701,25 +725,39 @@ static int pmw3610_report_data(const struct device *dev) {
 #endif
 
     if (x != 0 || y != 0) {
-        if (input_mode != SCROLL) {
-            input_report_rel(dev, INPUT_REL_X, x, false, K_FOREVER);
-            input_report_rel(dev, INPUT_REL_Y, y, true, K_FOREVER);
-        } else {
+        if (input_mode == SCROLL) {
             data->scroll_delta_x += x;
             data->scroll_delta_y += y;
             if (abs(data->scroll_delta_y) > CONFIG_PMW3610_SCROLL_TICK) {
                 input_report_rel(dev, INPUT_REL_WHEEL,
                                  data->scroll_delta_y > 0 ? PMW3610_SCROLL_Y_NEGATIVE : PMW3610_SCROLL_Y_POSITIVE,
                                  true, K_FOREVER);
-                data->scroll_delta_x = 0;
+                //data->scroll_delta_x = 0;
                 data->scroll_delta_y = 0;
-            } else if (abs(data->scroll_delta_x) > CONFIG_PMW3610_SCROLL_TICK) {
+            }
+            if (abs(data->scroll_delta_x) > CONFIG_PMW3610_SCROLL_TICK) {
                 input_report_rel(dev, INPUT_REL_HWHEEL,
                                  data->scroll_delta_x > 0 ? PMW3610_SCROLL_X_NEGATIVE : PMW3610_SCROLL_X_POSITIVE,
                                  true, K_FOREVER);
                 data->scroll_delta_x = 0;
+                //data->scroll_delta_y = 0;
+            }
+        } else if (input_mode == TEXT) {
+            data->scroll_delta_x += x;
+            data->scroll_delta_y += y;
+            if (abs(data->scroll_delta_x) > CONFIG_PMW3610_SCROLL_TICK) {
+                tap_key(data->scroll_delta_x > 0 ? 0x4F : 0x50);
+                data->scroll_delta_x = 0;
                 data->scroll_delta_y = 0;
             }
+            if (abs(data->scroll_delta_y) > CONFIG_PMW3610_SCROLL_TICK) {
+                tap_key(data->scroll_delta_y > 0 ? 0x51 : 0x52);
+                data->scroll_delta_y = 0;
+                data->scroll_delta_y = 0;
+            }
+        } else {
+            input_report_rel(dev, INPUT_REL_X, x, false, K_FOREVER);
+            input_report_rel(dev, INPUT_REL_Y, y, true, K_FOREVER);
         }
     }
 
@@ -828,6 +866,7 @@ static int pmw3610_init(const struct device *dev) {
     static struct pixart_data data##n;                                                             \
     static int32_t scroll_layers##n[] = DT_PROP(DT_DRV_INST(n), scroll_layers);                    \
     static int32_t snipe_layers##n[] = DT_PROP(DT_DRV_INST(n), snipe_layers);                      \
+    static int32_t text_layers##n[] = DT_PROP(DT_DRV_INST(n), text_layers);                        \
     static const struct pixart_config config##n = {                                                \
         .irq_gpio = GPIO_DT_SPEC_INST_GET(n, irq_gpios),                                           \
         .bus =                                                                                     \
@@ -846,6 +885,8 @@ static int pmw3610_init(const struct device *dev) {
         .scroll_layers_len = DT_PROP_LEN(DT_DRV_INST(n), scroll_layers),                           \
         .snipe_layers = snipe_layers##n,                                                           \
         .snipe_layers_len = DT_PROP_LEN(DT_DRV_INST(n), snipe_layers),                             \
+        .text_layers = text_layers##n,                                                             \
+        .text_layers_len = DT_PROP_LEN(DT_DRV_INST(n), text_layers),                               \
     };                                                                                             \
                                                                                                    \
     DEVICE_DT_INST_DEFINE(n, pmw3610_init, NULL, &data##n, &config##n, POST_KERNEL,                \
