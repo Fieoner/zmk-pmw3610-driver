@@ -77,8 +77,8 @@ static inline void tap_key(uint32_t param1) {
     	.behavior_dev = "key_press",
     	.param1 = param1,
     };
-    zmk_behavior_queue_add(0, behavior, true, 10);
-    zmk_behavior_queue_add(0, behavior, false, 10);
+    zmk_behavior_queue_add(0, behavior, true, 1);
+    zmk_behavior_queue_add(0, behavior, false, 1);
 }
 
 // checked and keep
